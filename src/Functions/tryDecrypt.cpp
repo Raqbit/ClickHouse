@@ -1,4 +1,4 @@
-#include <Common/Documentation.h>
+#include <Common/FunctionDocumentation.h>
 #include "config.h"
 
 #if USE_SSL
@@ -23,7 +23,7 @@ namespace DB
 
 REGISTER_FUNCTION(TryDecrypt)
 {
-    factory.registerFunction<FunctionDecrypt<TryDecryptImpl>>(Documentation(
+    factory.registerFunction<FunctionDecrypt<TryDecryptImpl>>(FunctionDocumentation(
         "Similar to `decrypt`, but returns NULL if decryption fails because of using the wrong key."));
 }
 
