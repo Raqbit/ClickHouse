@@ -122,6 +122,8 @@ namespace CurrentMetrics
     extern const Metric MergeTreePartsLoaderThreadsActive;
     extern const Metric MergeTreePartsCleanerThreads;
     extern const Metric MergeTreePartsCleanerThreadsActive;
+    extern const Metric OutdatedPartsLoadingThreads;
+    extern const Metric OutdatedPartsLoadingThreadsActive;
 }
 
 
@@ -1811,6 +1813,7 @@ try
     if (is_async)
         shared_lock = lockForShare(RWLockImpl::NO_QUERY, getSettings()->lock_acquire_timeout_for_background_operations);
 
+    bool use_threadpool = false;
     size_t num_loaded_parts = 0;
     while (true)
     {
@@ -1818,6 +1821,8 @@ try
 
         {
             std::lock_guard lock(outdated_data_parts_mutex);
+
+            use_threadpool |= static_cast<bool>(outdated_data_parts_threadpool);
 
             if (is_async && outdated_data_parts_loading_canceled)
             {
@@ -1834,16 +1839,27 @@ try
             outdated_unloaded_data_parts.pop_back();
         }
 
-        auto res = loadDataPart(part->info, part->name, part->disk, MergeTreeDataPartState::Outdated, data_parts_mutex);
-        ++num_loaded_parts;
+        auto routine = [&]()
+        {
+            auto res = loadDataPart(part->info, part->name, part->disk, MergeTreeDataPartState::Outdated, data_parts_mutex);
+            ++num_loaded_parts;
 
-        if (res.is_broken)
-            res.part->renameToDetached("broken-on-start"); /// detached parts must not have '_' in prefixes
-        else if (res.part->is_duplicate)
-            res.part->remove();
+            if (res.is_broken)
+                res.part->renameToDetached("broken-on-start"); /// detached parts must not have '_' in prefixes
+            else if (res.part->is_duplicate)
+                res.part->remove();
+            else
+                preparePartForRemoval(res.part);
+        };
+
+        if (use_threadpool)
+            outdated_data_threadpool->scheduleOrThrow(routine);
         else
-            preparePartForRemoval(res.part);
+            routine();
     }
+
+    if (use_thread_pool)
+        outdated_data_threadpool->wait();
 
     LOG_DEBUG(log, "Loaded {} outdated data parts {}",
         num_loaded_parts, is_async ? "asynchronously" : "synchronously");
@@ -1865,6 +1881,10 @@ void MergeTreeData::waitForOutdatedPartsToBeLoaded() const TSA_NO_THREAD_SAFETY_
         return;
 
     std::unique_lock lock(outdated_data_parts_mutex);
+
+    if (!outdated_data_parts_threadpool)
+        outdated_data_parts_threadpool = std::make_unique<ThreadPool>(CurrentMetrics::OutdatedPartsLoadingThreads, CurrentMetrics::OutdatedPartsLoadingThreadsActive);
+
     if (outdated_unloaded_data_parts.empty())
         return;
 
